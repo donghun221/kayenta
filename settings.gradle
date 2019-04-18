@@ -22,15 +22,20 @@ include 'kayenta-core'
 include 'kayenta-datadog'
 include 'kayenta-gcs'
 include 'kayenta-google'
+include 'kayenta-graphite'
 include 'kayenta-influxdb'
 include 'kayenta-judge'
 include 'kayenta-mannwhitney'
+include 'kayenta-newrelic-insights'
 include 'kayenta-objectstore-configbin'
 include 'kayenta-objectstore-memory'
 include 'kayenta-orca'
 include 'kayenta-prometheus'
 include 'kayenta-s3'
+include 'kayenta-signalfx'
 include 'kayenta-stackdriver'
+include 'kayenta-standalone-canary-analysis'
+include 'kayenta-wavefront'
 include 'kayenta-web'
 
 def setBuildFile(project) {
@@ -43,4 +48,3 @@ def setBuildFile(project) {
 rootProject.children.each {
   setBuildFile(it)
 }
-

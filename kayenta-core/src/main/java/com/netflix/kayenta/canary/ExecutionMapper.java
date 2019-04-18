@@ -22,11 +22,11 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 import com.netflix.kayenta.canary.orca.CanaryStageNames;
 import com.netflix.kayenta.canary.providers.metrics.QueryConfigUtils;
+import com.netflix.kayenta.canary.results.CanaryJudgeResult;
+import com.netflix.kayenta.canary.results.CanaryResult;
 import com.netflix.kayenta.security.AccountCredentials;
 import com.netflix.kayenta.security.AccountCredentialsRepository;
 import com.netflix.kayenta.security.CredentialsHelper;
-import com.netflix.kayenta.storage.ObjectType;
-import com.netflix.kayenta.storage.StorageService;
 import com.netflix.kayenta.storage.StorageServiceRepository;
 import com.netflix.spectator.api.Id;
 import com.netflix.spectator.api.Registry;
@@ -43,6 +43,7 @@ import org.springframework.stereotype.Component;
 
 import javax.validation.constraints.NotNull;
 import java.io.IOException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -51,6 +52,8 @@ import java.util.stream.IntStream;
 @Component
 @Slf4j
 public class ExecutionMapper {
+
+  public static final String PIPELINE_NAME = "Standard Canary Pipeline";
 
   private final StorageServiceRepository storageServiceRepository;
   private final AccountCredentialsRepository accountCredentialsRepository;
@@ -104,11 +107,6 @@ public class ExecutionMapper {
                                                                              AccountCredentials.Type.OBJECT_STORE,
                                                                              accountCredentialsRepository);
 
-    StorageService storageService =
-      storageServiceRepository
-        .getOne(storageAccountName)
-        .orElseThrow(() -> new IllegalArgumentException("No storage service was configured; unable to retrieve results."));
-
     String canaryExecutionId = pipeline.getId();
 
     Stage judgeStage = pipeline.getStages().stream()
@@ -145,7 +143,8 @@ public class ExecutionMapper {
       canaryExecutionStatusResponseBuilder.configurationAccountName(configurationAccountName);
     }
     canaryExecutionStatusResponseBuilder.config(getCanaryConfig(pipeline));
-    canaryExecutionStatusResponseBuilder.canaryExecutionRequest(getCanaryExecutionRequest(pipeline));
+    CanaryExecutionRequest canaryExecutionRequest = getCanaryExecutionRequest(pipeline);
+    canaryExecutionStatusResponseBuilder.canaryExecutionRequest(canaryExecutionRequest);
 
     if (mixerOutputs.containsKey("metricSetPairListId")) {
       canaryExecutionStatusResponseBuilder.metricSetPairListId((String)mixerOutputs.get("metricSetPairListId"));
@@ -185,9 +184,12 @@ public class ExecutionMapper {
     }
 
     if (isComplete && pipelineStatus.equals("succeeded")) {
-      if (judgeOutputs.containsKey("canaryJudgeResultId")) {
-        String canaryJudgeResultId = (String)judgeOutputs.get("canaryJudgeResultId");
-        canaryExecutionStatusResponseBuilder.result(storageService.loadObject(storageAccountName, ObjectType.CANARY_RESULT, canaryJudgeResultId));
+      if (judgeOutputs.containsKey("result")) {
+        Map<String, Object> resultMap = (Map<String, Object>)judgeOutputs.get("result");
+        CanaryJudgeResult canaryJudgeResult = objectMapper.convertValue(resultMap, CanaryJudgeResult.class);
+        Duration canaryDuration = canaryExecutionRequest != null ? canaryExecutionRequest.calculateDuration() : null;
+        CanaryResult result = CanaryResult.builder().judgeResult(canaryJudgeResult).canaryDuration(canaryDuration).build();
+        canaryExecutionStatusResponseBuilder.result(result);
       }
     }
 
@@ -205,7 +207,7 @@ public class ExecutionMapper {
   }
 
   // Some older (stored) results have the execution request only in the judge context.
-  public String getCanaryExectutionRequestFromJudgeContext(Execution pipeline) {
+  public String getCanaryExecutionRequestFromJudgeContext(Execution pipeline) {
     Stage contextStage = pipeline.getStages().stream()
       .filter(stage -> stage.getRefId().equals(CanaryStageNames.REFID_JUDGE))
       .findFirst()
@@ -225,7 +227,7 @@ public class ExecutionMapper {
 
     String canaryExecutionRequestJSON = (String)context.get("canaryExecutionRequest");
     if (canaryExecutionRequestJSON == null) {
-      canaryExecutionRequestJSON = getCanaryExectutionRequestFromJudgeContext(pipeline);
+      canaryExecutionRequestJSON = getCanaryExecutionRequestFromJudgeContext(pipeline);
     }
     if (canaryExecutionRequestJSON == null) {
       return null;
@@ -338,22 +340,19 @@ public class ExecutionMapper {
       application = "kayenta-" + currentInstanceId;
     }
 
-    if (StringUtils.isEmpty(parentPipelineExecutionId)) {
-      parentPipelineExecutionId = "no-parent-pipeline-execution";
-    }
-
     canaryConfig = QueryConfigUtils.escapeTemplates(canaryConfig);
 
-    HashMap<String, Object> setupCanaryContext =
-      Maps.newHashMap(
-        new ImmutableMap.Builder<String, Object>()
-          .put("refId", CanaryStageNames.REFID_SET_CONTEXT)
-          .put("user", "[anonymous]")
-          .put("application", application)
-          .put("parentPipelineExecutionId", parentPipelineExecutionId)
-          .put("storageAccountName", resolvedStorageAccountName)
-          .put("canaryConfig", canaryConfig)
-          .build());
+    ImmutableMap.Builder<String, Object> mapBuilder = new ImmutableMap.Builder<String, Object>()
+      .put("refId", CanaryStageNames.REFID_SET_CONTEXT)
+      .put("user", "[anonymous]")
+      .put("application", application)
+      .put("storageAccountName", resolvedStorageAccountName)
+      .put("canaryConfig", canaryConfig);
+    if (parentPipelineExecutionId != null) {
+      mapBuilder.put("parentPipelineExecutionId", parentPipelineExecutionId);
+    }
+
+    HashMap<String, Object> setupCanaryContext = Maps.newHashMap(mapBuilder.build());
     if (resolvedConfigurationAccountName != null) {
       setupCanaryContext.put("configurationAccountName", resolvedConfigurationAccountName);
     }
@@ -387,14 +386,9 @@ public class ExecutionMapper {
           .put("experimentRefidPrefix", CanaryStageNames.REFID_FETCH_EXPERIMENT_PREFIX)
           .build());
 
-    CanaryClassifierThresholdsConfig orchestratorScoreThresholds = canaryExecutionRequest.getThresholds();
-
+    final CanaryClassifierThresholdsConfig orchestratorScoreThresholds = canaryExecutionRequest.getThresholds();
     if (orchestratorScoreThresholds == null) {
-      if (canaryConfig.getClassifier() == null || canaryConfig.getClassifier().getScoreThresholds() == null) {
-        throw new IllegalArgumentException("Classifier thresholds must be specified in either the canary config, or the execution request.");
-      }
-      // The score thresholds were not explicitly passed in from the orchestrator (i.e. Spinnaker), so just use the canary config values.
-      orchestratorScoreThresholds = canaryConfig.getClassifier().getScoreThresholds();
+      throw new IllegalArgumentException("Execution request must contain thresholds");
     }
 
     String canaryExecutionRequestJSON = objectMapper.writeValueAsString(canaryExecutionRequest);
@@ -414,7 +408,7 @@ public class ExecutionMapper {
     String canaryPipelineConfigId = application + "-standard-canary-pipeline";
     PipelineBuilder pipelineBuilder =
       new PipelineBuilder(application)
-        .withName("Standard Canary Pipeline")
+        .withName(PIPELINE_NAME)
         .withPipelineConfigId(canaryPipelineConfigId)
         .withStage("setupCanary", "Setup Canary", setupCanaryContext)
         .withStage("metricSetMixer", "Mix Control and Experiment Results", mixMetricSetsContext)
@@ -428,6 +422,107 @@ public class ExecutionMapper {
                                       pipelineBuilder.withStage((String)context.get("stageType"),
                                                                 (String)context.get("refId"),
                                                                 context));
+
+    Execution pipeline = pipelineBuilder
+      .withLimitConcurrent(false)
+      .build();
+
+    executionRepository.store(pipeline);
+
+    try {
+      executionLauncher.start(pipeline);
+    } catch (Throwable t) {
+      handleStartupFailure(pipeline, t);
+    }
+
+    return CanaryExecutionResponse.builder().canaryExecutionId(pipeline.getId()).build();
+  }
+
+  public CanaryExecutionResponse buildJudgeComparisonExecution(String application,
+                                                               String parentPipelineExecutionId,
+                                                               @NotNull String canaryConfigId,
+                                                               @NotNull CanaryConfig canaryConfig,
+                                                               String overrideCanaryJudge1,
+                                                               String overrideCanaryJudge2,
+                                                               String metricSetPairListId,
+                                                               Double passThreshold,
+                                                               Double marginalThreshold,
+                                                               String resolvedConfigurationAccountName,
+                                                               @NotNull String resolvedStorageAccountName) throws JsonProcessingException {
+    if (StringUtils.isEmpty(application)) {
+      application = "kayenta-" + currentInstanceId;
+    }
+
+    canaryConfig = QueryConfigUtils.escapeTemplates(canaryConfig);
+
+    ImmutableMap.Builder<String, Object> mapBuilder = new ImmutableMap.Builder<String, Object>()
+      .put("refId", CanaryStageNames.REFID_SET_CONTEXT)
+      .put("user", "[anonymous]")
+      .put("application", application)
+      .put("storageAccountName", resolvedStorageAccountName)
+      .put("canaryConfig", canaryConfig);
+    if (parentPipelineExecutionId != null) {
+      mapBuilder.put("parentPipelineExecutionId", parentPipelineExecutionId);
+    }
+
+    HashMap<String, Object> setupCanaryContext = Maps.newHashMap(mapBuilder.build());
+
+    if (resolvedConfigurationAccountName != null) {
+      setupCanaryContext.put("configurationAccountName", resolvedConfigurationAccountName);
+    }
+    if (canaryConfigId != null) {
+      setupCanaryContext.put("canaryConfigId", canaryConfigId);
+    }
+
+    Map<String, Object> canaryJudgeContext1 =
+      Maps.newHashMap(
+        new ImmutableMap.Builder<String, Object>()
+          .put("refId", CanaryStageNames.REFID_JUDGE)
+          .put("requisiteStageRefIds", Collections.singletonList(CanaryStageNames.REFID_SET_CONTEXT))
+          .put("user", "[anonymous]")
+          .put("storageAccountName", resolvedStorageAccountName)
+          .put("metricSetPairListId", metricSetPairListId)
+          .put("orchestratorScoreThresholds", CanaryClassifierThresholdsConfig.builder().pass(passThreshold).marginal(marginalThreshold).build())
+          .build());
+    if (StringUtils.isNotEmpty(overrideCanaryJudge1)) {
+      canaryJudgeContext1.put("overrideJudgeName", overrideCanaryJudge1);
+    }
+
+    Map<String, Object> canaryJudgeContext2 =
+      Maps.newHashMap(
+        new ImmutableMap.Builder<String, Object>()
+          .put("refId", CanaryStageNames.REFID_JUDGE + "-2")
+          .put("requisiteStageRefIds", Collections.singletonList(CanaryStageNames.REFID_SET_CONTEXT))
+          .put("user", "[anonymous]")
+          .put("storageAccountName", resolvedStorageAccountName)
+          .put("metricSetPairListId", metricSetPairListId)
+          .put("orchestratorScoreThresholds", CanaryClassifierThresholdsConfig.builder().pass(passThreshold).marginal(marginalThreshold).build())
+          .build());
+    if (StringUtils.isNotEmpty(overrideCanaryJudge2)) {
+      canaryJudgeContext2.put("overrideJudgeName", overrideCanaryJudge2);
+    }
+
+    Map<String, Object> compareJudgeResultsContext =
+      Maps.newHashMap(
+        new ImmutableMap.Builder<String, Object>()
+          .put("refId", "compareJudgeResults")
+          .put("requisiteStageRefIds", Arrays.asList(new String[]{CanaryStageNames.REFID_JUDGE,
+                                                                  CanaryStageNames.REFID_JUDGE + "-2"}))
+          .put("user", "[anonymous]")
+          .put("storageAccountName", resolvedStorageAccountName)
+          .put("judge1Result", "${ #stage('Perform Analysis with Judge 1')['context']['result']}")
+          .put("judge2Result", "${ #stage('Perform Analysis with Judge 2')['context']['result']}")
+          .build());
+
+    String canaryPipelineConfigId = application + "-standard-canary-pipeline";
+    PipelineBuilder pipelineBuilder =
+      new PipelineBuilder(application)
+        .withName("Standard Canary Pipeline")
+        .withPipelineConfigId(canaryPipelineConfigId)
+        .withStage("setupCanary", "Setup Canary", setupCanaryContext)
+        .withStage("canaryJudge", "Perform Analysis with Judge 1", canaryJudgeContext1)
+        .withStage("canaryJudge", "Perform Analysis with Judge 2", canaryJudgeContext2)
+        .withStage("compareJudgeResults", "Compare Judge Results", compareJudgeResultsContext);
 
     Execution pipeline = pipelineBuilder
       .withLimitConcurrent(false)

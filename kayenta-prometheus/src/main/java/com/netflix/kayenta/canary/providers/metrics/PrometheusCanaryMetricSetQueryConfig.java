@@ -30,6 +30,11 @@ import java.util.List;
 @JsonTypeName("prometheus")
 public class PrometheusCanaryMetricSetQueryConfig implements CanaryMetricSetQueryConfig {
 
+  public static final String SERVICE_TYPE = "prometheus";
+
+  @Getter
+  private String resourceType;
+
   @NotNull
   @Getter
   private String metricName;
@@ -40,14 +45,21 @@ public class PrometheusCanaryMetricSetQueryConfig implements CanaryMetricSetQuer
   @Getter
   private List<String> groupByFields;
 
+  /**
+   * @deprecated Use customInlineTemplate instead.
+   */
+  @Deprecated
   @Getter
   private String customFilter;
+
+  @Getter
+  private String customInlineTemplate;
 
   @Getter
   private String customFilterTemplate;
 
   @Override
   public String getServiceType() {
-    return "prometheus";
+    return SERVICE_TYPE;
   }
 }

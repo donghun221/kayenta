@@ -17,14 +17,14 @@
 package com.netflix.kayenta.judge.scorers
 
 import com.netflix.kayenta.canary.results.CanaryAnalysisResult
-import com.netflix.kayenta.judge.classifiers.metric.{High, Low, Nodata, Pass}
+import com.netflix.kayenta.judge.classifiers.metric.{High, Low, Nodata, Pass, NodataFailMetric}
 import org.apache.commons.math.util.MathUtils
 
 import scala.collection.JavaConverters._
 
 class WeightedSumScorer(groupWeights: Map[String, Double]) extends BaseScorer {
 
-  val NODATA_THRESHOLD = 50.0
+  val NODATA_THRESHOLD = 50
 
   private def calculateGroupScore(groupName: String, classificationLabels: List[String]): GroupScore = {
     val labelCounts = classificationLabels.groupBy(identity).mapValues(_.size)
@@ -33,7 +33,8 @@ class WeightedSumScorer(groupWeights: Map[String, Double]) extends BaseScorer {
     val numPass = labelCounts.getOrElse(Pass.toString, 0)
     val numHigh = labelCounts.getOrElse(High.toString, 0)
     val numLow = labelCounts.getOrElse(Low.toString, 0)
-    val numTotal = numHigh + numLow + numPass
+    val numMissingRequiredData = labelCounts.getOrElse(NodataFailMetric.toString, 0)
+    val numTotal = numHigh + numLow + numPass + numMissingRequiredData
 
     val hasNoData = numTotal == 0
     val score = if (hasNoData) 0.0 else (numPass/numTotal.toDouble) * 100
@@ -76,9 +77,8 @@ class WeightedSumScorer(groupWeights: Map[String, Double]) extends BaseScorer {
     MathUtils.round(summaryScore, 2)
   }
 
-  def criticalFailures(results: List[CanaryAnalysisResult]): Boolean = {
-    val criticalFailures = results.filter { result => result.isCritical && !result.getClassification.equals(Pass.toString) }
-    criticalFailures.nonEmpty
+  def criticalFailures(results: List[CanaryAnalysisResult]): List[CanaryAnalysisResult] = {
+    results.filter { result => result.isCritical && !result.getClassification.equals(Pass.toString) }
   }
 
   def tooManyNodata(results: List[CanaryAnalysisResult]): Boolean = {
@@ -90,13 +90,18 @@ class WeightedSumScorer(groupWeights: Map[String, Double]) extends BaseScorer {
   override def score(results: List[CanaryAnalysisResult]): ScoreResult = {
     val groupScores = calculateGroupScores(results)
 
-    if (criticalFailures(results)) {
-      ScoreResult(Some(groupScores), 0.0, results.size)
+    val failures = criticalFailures(results)
+    if (failures.nonEmpty) {
+      val reason = s"Canary Failed: ${failures.head.getClassificationReason}"
+      ScoreResult(Some(groupScores), 0.0, results.size, Some(reason))
+
     } else if (tooManyNodata(results)) {
-      ScoreResult(Some(groupScores), 0.0, results.size)
+      val reason = s"Canary Failed: $NODATA_THRESHOLD% or more metrics returned ${Nodata.toString.toUpperCase}"
+      ScoreResult(Some(groupScores), 0.0, results.size, Some(reason))
+
     } else {
       val summaryScore = calculateSummaryScore(groupScores)
-      ScoreResult(Some(groupScores), summaryScore, results.size)
+      ScoreResult(Some(groupScores), summaryScore, results.size , reason = None)
     }
   }
 }

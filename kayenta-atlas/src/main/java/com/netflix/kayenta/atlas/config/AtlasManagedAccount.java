@@ -28,10 +28,12 @@ public class AtlasManagedAccount {
   @NotNull
   private String name;
 
-  @NotNull
-  String backendsJsonBaseUrl;
-
-  String fetchId;
-
   private List<AccountCredentials.Type> supportedTypes;
+
+  @NotNull
+  private String backendsJsonBaseUrl;
+
+  private String fetchId;
+
+  private List<String> recommendedLocations;
 }

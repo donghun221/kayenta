@@ -1,6 +1,9 @@
 server:
   port: 8090
 
+redis:
+  connection: redis://localhost:6379
+
 kayenta:
   atlas:
     enabled: false
@@ -47,6 +50,24 @@ kayenta:
 #          - METRICS_STORE
 #        endpoint.baseUrl: https://app.datadoghq.com
 
+  graphite:
+    enabled: false
+#    accounts:
+#      - name: my-graphite-account
+#        endpoint:
+#          baseUrl: http://localhost
+#        supportedTypes:
+#          - METRICS_STORE
+
+  newrelic:
+    enabled: false
+#    accounts:
+#    - name: my-newrelic-account
+#      apiKey: xxxx
+#      applicationKey: xxxx
+#      supportedTypes:
+#      - METRICS_STORE
+
   prometheus:
     enabled: false
 #    accounts:
@@ -64,6 +85,15 @@ kayenta:
 #          baseUrl: http://localhost:8086
 #        supportedTypes:
 #          - METRICS_STORE
+  wavefront:
+   enabled: false
+#   accounts:
+#      - name:
+#        endpoint:
+#          baseUrl:
+#        apiToken:
+#        supportedTypes:
+#          - METRICS_STORE
 
   gcs:
     enabled: false
@@ -79,6 +109,11 @@ kayenta:
 
   configbin:
     enabled: false
+
+  remoteJudge:
+    enabled: false
+#    endpoint:
+#      baseUrl: http://remotejudge.example.com/path/to/service
 
 management.security.enabled: false
 
@@ -110,4 +145,6 @@ swagger:
     - /metadata.*
     - /metricSetList.*
     - /metricSetPairList.*
+    - /metricServices.*
     - /pipeline.*
+    - /standalone.*

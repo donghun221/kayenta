@@ -67,6 +67,25 @@ public class BackendsTest {
   }
 
   @Test
+  public void getLocationsTest() throws IOException {
+    List<Backend> backends = readBackends("backends-location-test.json");
+
+    BackendDatabase db = new BackendDatabase();
+    db.update(backends);
+
+    List<String> locations = db.getLocations();
+    assertEquals(10, locations.size());
+    assert(locations.contains("test.global"));
+    assert(locations.contains("prod.global"));
+    assert(locations.contains("test.us-east-1"));
+    assert(locations.contains("prod.us-east-1"));
+    assert(locations.contains("test.us-west-2"));
+    assert(locations.contains("prod.us-west-2"));
+    assert(locations.contains("test.eu-west-1"));
+    assert(locations.contains("prod.eu-west-1"));
+  }
+
+  @Test
   public void formattingReplacesAllTheThings() {
     Backend backend = Backend.builder()
       .cname("deployment=$(deployment).region=$(region).env=$(env).dataset=$(dataset).envAgain=$(env)")
@@ -74,4 +93,19 @@ public class BackendsTest {
     assertEquals("http://deployment=xmain.region=xregion.env=xtest.dataset=xglobal.envAgain=xtest",
                  backend.getUri("http", "xmain", "xglobal", "xregion", "xtest"));
   }
+  @Test
+  public void getUriForlocationTest() throws IOException {
+    List<Backend> backends = readBackends("backends-location-test.json");
+
+    BackendDatabase db = new BackendDatabase();
+    db.update(backends);
+
+    assertEquals("http://atlas-global.test.example.com",
+                 db.getUriForLocation("http", "test.global"));
+    assertEquals("http://atlas-global.prod.example.com",
+                 db.getUriForLocation("http", "prod.global"));
+    assertEquals("http://atlas-main.us-east-1.prod.example.com",
+                 db.getUriForLocation("http", "prod.us-east-1"));
+  }
+
 }

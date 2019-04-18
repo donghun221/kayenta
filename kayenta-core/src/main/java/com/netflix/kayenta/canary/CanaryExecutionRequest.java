@@ -15,7 +15,7 @@
  */
 package com.netflix.kayenta.canary;
 
-import lombok.Data;
+import lombok.*;
 
 import javax.validation.constraints.NotNull;
 import java.time.Duration;
@@ -25,10 +25,16 @@ import java.util.Map;
 import java.util.Set;
 
 @Data
+@Builder
+@NoArgsConstructor
+@AllArgsConstructor
 public class CanaryExecutionRequest {
+
+  @Singular
   @NotNull
   protected Map<String, CanaryScopePair> scopes;
 
+  @NotNull
   protected CanaryClassifierThresholdsConfig thresholds;
 
   protected List<Metadata> metadata;

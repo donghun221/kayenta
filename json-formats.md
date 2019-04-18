@@ -6,7 +6,7 @@ This config defines the metrics and analysis thresholds set for a canary run.
 Typically, thresholds can be overridden at execution time as well.
 
 It is normal to have all metrics for a given canary run come from the same source.  In these examples,
-Atlas, Stackdriver and Prometheus are used.
+Atlas, Stackdriver, Prometheus, Datadog, SignalFx, and Wavefront are used.
 
 
 ```JSON
@@ -203,6 +203,147 @@ Atlas, Stackdriver and Prometheus are used.
   }
 }
 ```
+```JSON
+{
+  "name": "SignalFxIntegrationTestCanaryConfig",
+  "description": "A very simple config for integration testing the SignalFx metric source Kayenta module.",
+  "judge": {
+    "judgeConfigurations": {},
+    "name": "NetflixACAJudge-v1.0"
+  },
+  "metrics": [
+    {
+      "name": "Cpu Usage Percentage",
+      "query": {
+        "metricName": "kayenta.integration-test.cpu.avg",
+        "aggregationMethod": "avg",
+        "serviceType": "signalfx",
+        "type": "signalfx"
+      },
+      "analysisConfigurations": {
+        "canary": {
+          "direction": "increase"
+        }
+      },
+      "groups": [
+        "Integration Test Group"
+      ],
+      "scopeName": "default"
+    },
+    {
+      "name": "Bad Request Rate for /v1/some-endpoint",
+      "query": {
+        "metricName": "kayenta.integration-test.request.count",
+        "queryPairs": [
+          {
+            "key": "uri",
+            "value": "/v1/some-endpoint"
+          },
+          {
+            "key": "status_code",
+            "value": "4*"
+          }
+        ],
+        "aggregationMethod": "sum",
+        "serviceType": "signalfx",
+        "type": "signalfx"
+      },
+      "analysisConfigurations": {
+        "canary": {
+          "direction": "increase",
+          "critical": true
+        }
+      },
+      "groups": [
+        "Integration Test Group"
+      ],
+      "scopeName": "default"
+    }
+  ],
+  "classifier": {
+    "groupWeights": {
+      "Integration Test Group": 100
+    },
+    "scoreThresholds": {
+      "marginal": 50,
+      "pass": 75
+    }
+  }
+}
+```
+```JSON
+{
+  "name": "MySampleGraphiteCanaryConfig",
+  "description": "Example Kayenta Configuration using Graphite",
+  "configVersion": "1.0",
+  "applications": [
+    "myapp"
+  ],
+  "judge": {
+    "name": "dredd-v1.0",
+    "judgeConfigurations": { }
+  },
+  "metrics": [
+    {
+      "name": "CPU",
+      "query": {
+        "type": "graphite",
+        "metricName": "system.cpu.user"
+      },
+      "groups": ["system"],
+      "analysisConfigurations": { },
+      "scopeName": "default"
+    }
+  ],
+  "classifier": {
+    "groupWeights": {
+      "system": 100.0
+    },
+    "scoreThresholds": {
+      "pass": 95.0,
+      "marginal": 75.0
+    }
+  }
+}
+```
+```JSON
+{
+  "name": "MySampleWavefrontCanaryConfig",
+  "description": "Example Kayenta Configuration using Wavefront",
+  "configVersion": "1.0",
+  "applications": [
+    "myapp"
+  ],
+  "judge": {
+    "name": "dredd-v1.0",
+    "judgeConfigurations": { }
+  },
+  "metrics": [
+    {
+      "name": "CPU",
+      "query": {
+        "type": "wavefront",
+        "metricName": "heapster.pod.cpu.usage_rate",
+        "aggregate": "avg",
+        "summerization": "MEAN"
+      },
+      "groups": ["system"],
+      "analysisConfigurations": { },
+      "scopeName": "default"
+    }
+  ],
+  "classifier": {
+    "groupWeights": {
+      "system": 100.0
+    },
+    "scoreThresholds": {
+      "pass": 95.0,
+      "marginal": 75.0
+    }
+  }
+}
+```
+
 ## Canary Data Archival Format
 
 This format is used to store the results from a specific canary run.

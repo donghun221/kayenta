@@ -37,6 +37,7 @@ import java.io.StringReader;
 import java.lang.reflect.InvocationTargetException;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -48,13 +49,25 @@ public class QueryConfigUtils {
                                           CanaryMetricSetQueryConfig metricSetQuery,
                                           CanaryScope canaryScope,
                                           String[] baseScopeAttributes) throws IOException {
-    String customFilter = metricSetQuery.getCustomFilter();
-    String customFilterTemplate = metricSetQuery.getCustomFilterTemplate();
+    if (metricSetQuery.getCustomFilter() != null) {
+      throw new IllegalArgumentException("CanaryMetricSetQueryConfig.customFilter is deprecated, use CanaryMetricSetQueryConfig.customInlineTemplate instead.");
+    }
 
-    log.debug("customFilter={}", customFilter);
+    String customInlineTemplate = metricSetQuery.getCustomInlineTemplate();
+    String customFilterTemplate = metricSetQuery.getCustomFilterTemplate();
+    String templateToExpand;
+    String expandedTemplate;
+
+    log.debug("customInlineTemplate={}", customInlineTemplate);
     log.debug("customFilterTemplate={}", customFilterTemplate);
 
-    if (StringUtils.isEmpty(customFilter) && !StringUtils.isEmpty(customFilterTemplate)) {
+    if (StringUtils.isEmpty(customInlineTemplate) && StringUtils.isEmpty(customFilterTemplate)) {
+      return null;
+    }
+
+    if (!StringUtils.isEmpty(customInlineTemplate)) {
+      templateToExpand = unescapeTemplate(customInlineTemplate);
+    } else {
       Map<String, String> templates = canaryConfig.getTemplates();
 
       // TODO(duftler): Handle this as a config validation step instead.
@@ -64,48 +77,72 @@ public class QueryConfigUtils {
       } else if (!templates.containsKey(customFilterTemplate)) {
         throw new IllegalArgumentException("Custom filter template '" + customFilterTemplate + "' was not found.");
       }
+      templateToExpand = unescapeTemplate(templates.get(customFilterTemplate));
+    }
 
-      Configuration configuration = new Configuration(Configuration.VERSION_2_3_26);
-      String templateStr = unescapeTemplate(templates.get(customFilterTemplate));
-      Template template = new Template(customFilterTemplate, new StringReader(templateStr), configuration);
+    Configuration configuration = new Configuration(Configuration.VERSION_2_3_26);
+    Template template = new Template("template", new StringReader(templateToExpand), configuration);
 
+    try {
+      log.debug("extendedScopeParams={}", canaryScope.getExtendedScopeParams());
+
+      Map<String, String> templateBindings = new LinkedHashMap<>();
+      populateTemplateBindings(canaryScope, baseScopeAttributes, templateBindings, false);
+      populateTemplateBindings(metricSetQuery, baseScopeAttributes, templateBindings, true);
+
+      if (!CollectionUtils.isEmpty(canaryScope.getExtendedScopeParams())) {
+        templateBindings.putAll(canaryScope.getExtendedScopeParams());
+      }
+
+      log.debug("templateBindings={}", templateBindings);
+
+      expandedTemplate = FreeMarkerTemplateUtils.processTemplateIntoString(template, templateBindings);
+    } catch (TemplateException e) {
+      throw new IllegalArgumentException("Problem evaluating custom filter template:", e);
+    }
+
+    log.debug("expandedTemplate={}", expandedTemplate);
+
+    return expandedTemplate;
+  }
+
+  private static void populateTemplateBindings(Object bean,
+                                               String[] baseScopeAttributes,
+                                               Map<String, String> templateBindings,
+                                               boolean lenient) {
+    BeanInfo beanInfo;
+
+    try {
+      beanInfo = Introspector.getBeanInfo(bean.getClass());
+    } catch (IntrospectionException e) {
+      throw new IllegalArgumentException(e);
+    }
+
+    PropertyDescriptor[] propertyDescriptors = beanInfo.getPropertyDescriptors();
+
+    for (String baseScopeAttribute : baseScopeAttributes) {
       try {
-        log.debug("extendedScopeParams={}", canaryScope.getExtendedScopeParams());
+        Optional<PropertyDescriptor> propertyDescriptor = Stream.of(propertyDescriptors)
+          .filter(p -> p.getName().equals(baseScopeAttribute))
+          .findFirst();
 
-        Map<String, String> templateBindings = new LinkedHashMap<>();
-
-        for (String baseScopeAttribute : baseScopeAttributes) {
-          try {
-            BeanInfo beanInfo = Introspector.getBeanInfo(canaryScope.getClass());
-            PropertyDescriptor propertyDescriptor = Stream.of(beanInfo.getPropertyDescriptors())
-              .filter(p -> p.getName().equals(baseScopeAttribute))
-              .findFirst()
-              .orElseThrow(() -> new IllegalArgumentException("Unable to find property '" + baseScopeAttribute + "'."));
-            String propertyValue = (String)propertyDescriptor.getReadMethod().invoke(canaryScope);
-
-            if (!StringUtils.isEmpty(propertyValue)) {
-              templateBindings.put(baseScopeAttribute, propertyValue);
-            }
-          } catch (IntrospectionException | IllegalAccessException | InvocationTargetException e) {
-            throw new IllegalArgumentException(e);
+        if (!propertyDescriptor.isPresent()) {
+          if (lenient) {
+            continue;
+          } else {
+            throw new IllegalArgumentException("Unable to find property '" + baseScopeAttribute + "'.");
           }
         }
 
-        if (!CollectionUtils.isEmpty(canaryScope.getExtendedScopeParams())) {
-          templateBindings.putAll(canaryScope.getExtendedScopeParams());
+        String propertyValue = (String)propertyDescriptor.get().getReadMethod().invoke(bean);
+
+        if (!StringUtils.isEmpty(propertyValue)) {
+          templateBindings.put(baseScopeAttribute, propertyValue);
         }
-
-        log.debug("templateBindings={}", templateBindings);
-
-        customFilter = FreeMarkerTemplateUtils.processTemplateIntoString(template, templateBindings);
-      } catch (TemplateException e) {
-        throw new IllegalArgumentException("Problem evaluating custom filter template:", e);
+      } catch (IllegalAccessException | InvocationTargetException e) {
+        throw new IllegalArgumentException(e);
       }
     }
-
-    log.debug("Expanded: customFilter={}", customFilter);
-
-    return customFilter;
   }
 
   @VisibleForTesting

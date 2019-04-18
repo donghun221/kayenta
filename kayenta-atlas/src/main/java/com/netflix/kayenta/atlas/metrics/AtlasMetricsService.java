@@ -16,6 +16,7 @@
 
 package com.netflix.kayenta.atlas.metrics;
 
+import com.netflix.kayenta.atlas.backends.BackendDatabase;
 import com.netflix.kayenta.atlas.canary.AtlasCanaryScope;
 import com.netflix.kayenta.atlas.config.AtlasSSEConverter;
 import com.netflix.kayenta.atlas.model.AtlasResults;
@@ -32,6 +33,7 @@ import com.netflix.kayenta.metrics.MetricsService;
 import com.netflix.kayenta.retrofit.config.RemoteService;
 import com.netflix.kayenta.retrofit.config.RetrofitClientFactory;
 import com.netflix.kayenta.security.AccountCredentialsRepository;
+import com.netflix.kayenta.util.Retry;
 import com.netflix.spectator.api.Registry;
 import com.squareup.okhttp.OkHttpClient;
 import lombok.Builder;
@@ -41,7 +43,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 
 import javax.validation.constraints.NotNull;
-import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
@@ -53,6 +54,11 @@ import static java.time.temporal.ChronoUnit.SECONDS;
 @Builder
 @Slf4j
 public class AtlasMetricsService implements MetricsService {
+
+  public final String URI_SCHEME = "http";
+
+  public final int MAX_RETRIES = 10; // maximum number of times we'll retry an Atlas query
+  public final long RETRY_BACKOFF = 1000; // time between retries in millis
 
   @NotNull
   @Singular
@@ -71,6 +77,8 @@ public class AtlasMetricsService implements MetricsService {
   @Autowired
   private final Registry registry;
 
+  private final Retry retry = new Retry();
+
   @Override
   public String getType() {
     return "atlas";
@@ -81,15 +89,20 @@ public class AtlasMetricsService implements MetricsService {
     return accountNames.contains(accountName);
   }
 
+  private AtlasNamedAccountCredentials getCredentials(String accountName) {
+    return (AtlasNamedAccountCredentials)accountCredentialsRepository
+      .getOne(accountName)
+      .orElseThrow(() -> new IllegalArgumentException("Unable to resolve account " + accountName + "."));
+  }
+
   @Override
   public List<MetricSet> queryMetrics(String accountName,
                                       CanaryConfig canaryConfig,
                                       CanaryMetricConfig canaryMetricConfig,
-                                      CanaryScope canaryScope) throws IOException {
+                                      CanaryScope canaryScope) {
 
     OkHttpClient okHttpClient = new OkHttpClient();
-    // TODO: (mgraff, duftler) -- we should find out the defaults, and if too small, make this reasonable / configurable
-    okHttpClient.setConnectTimeout(90, TimeUnit.SECONDS);
+    okHttpClient.setConnectTimeout(30, TimeUnit.SECONDS);
     okHttpClient.setReadTimeout(90, TimeUnit.SECONDS);
 
     if (!(canaryScope instanceof AtlasCanaryScope)) {
@@ -99,26 +112,31 @@ public class AtlasMetricsService implements MetricsService {
     }
 
     AtlasCanaryScope atlasCanaryScope = (AtlasCanaryScope)canaryScope;
-    AtlasNamedAccountCredentials credentials = (AtlasNamedAccountCredentials)accountCredentialsRepository
-      .getOne(accountName)
-      .orElseThrow(() -> new IllegalArgumentException("Unable to resolve account " + accountName + "."));
-    Optional<Backend> backend = credentials.getBackendUpdater().getBackendDatabase().getOne(atlasCanaryScope.getDeployment(),
-                                                                                            atlasCanaryScope.getDataset(),
-                                                                                            atlasCanaryScope.getLocation(),
-                                                                                            atlasCanaryScope.getEnvironment());
-    if (!backend.isPresent()) {
-      throw new IllegalArgumentException("Unable to find an appropriate Atlas cluster for" +
-                                          " region=" + atlasCanaryScope.getLocation() +
-                                          " dataset=" + atlasCanaryScope.getDataset() +
-                                          " deployment=" + atlasCanaryScope.getDeployment() +
-                                          " environment=" + atlasCanaryScope.getEnvironment());
+    AtlasNamedAccountCredentials credentials = getCredentials(accountName);
+    BackendDatabase backendDatabase = credentials.getBackendUpdater().getBackendDatabase();
+    String uri = backendDatabase.getUriForLocation(URI_SCHEME, atlasCanaryScope.getLocation());
+    if (uri == null) {
+      Optional<Backend> backend = backendDatabase.getOne(atlasCanaryScope.getDeployment(),
+                                                         atlasCanaryScope.getDataset(),
+                                                         atlasCanaryScope.getLocation(),
+                                                         atlasCanaryScope.getEnvironment());
+      if (backend.isPresent()) {
+        uri = backend.get().getUri(URI_SCHEME,
+                                   atlasCanaryScope.getDeployment(),
+                                   atlasCanaryScope.getDataset(),
+                                   atlasCanaryScope.getLocation(),
+                                   atlasCanaryScope.getEnvironment());
+      }
     }
 
-    String uri = backend.get().getUri("http",
-                                      atlasCanaryScope.getDeployment(),
-                                      atlasCanaryScope.getDataset(),
-                                      atlasCanaryScope.getLocation(),
-                                      atlasCanaryScope.getEnvironment());
+    if (uri == null) {
+      throw new IllegalArgumentException("Unable to find an appropriate Atlas cluster for" +
+                                           " location=" + atlasCanaryScope.getLocation() +
+                                           " dataset=" + atlasCanaryScope.getDataset() +
+                                           " deployment=" + atlasCanaryScope.getDeployment() +
+                                           " environment=" + atlasCanaryScope.getEnvironment());
+    }
+
     RemoteService remoteService = new RemoteService();
     log.info("Using Atlas backend {}", uri);
     remoteService.setBaseUrl(uri);
@@ -133,12 +151,10 @@ public class AtlasMetricsService implements MetricsService {
     long start = registry.clock().monotonicTime();
     List <AtlasResults> atlasResultsList;
     try {
-      atlasResultsList = atlasRemoteService.fetch(decoratedQuery,
-                                                  atlasCanaryScope.getStart().toEpochMilli(),
-                                                  atlasCanaryScope.getEnd().toEpochMilli(),
-                                                  isoStep,
-                                                  credentials.getFetchId(),
-                                                  UUID.randomUUID() + "");
+      atlasResultsList = retry.retry(() -> atlasRemoteService.fetch(decoratedQuery,
+                                                                    atlasCanaryScope.getStart().toEpochMilli(),
+                                                                    atlasCanaryScope.getEnd().toEpochMilli(), isoStep, credentials.getFetchId(), UUID.randomUUID() + ""),
+      MAX_RETRIES, RETRY_BACKOFF);
     } finally {
       long end = registry.clock().monotonicTime();
       registry.timer("atlas.fetchTime").record(end - start, TimeUnit.NANOSECONDS);
@@ -148,6 +164,7 @@ public class AtlasMetricsService implements MetricsService {
 
     for (AtlasResults atlasResults : idToAtlasResultsMap.values()) {
       Instant responseStartTimeInstant = Instant.ofEpochMilli(atlasResults.getStart());
+      Instant responseEndTimeInstant = Instant.ofEpochMilli(atlasResults.getEnd());
       List<Double> timeSeriesList = atlasResults.getData().getValues();
 
       if (timeSeriesList == null) {
@@ -159,6 +176,8 @@ public class AtlasMetricsService implements MetricsService {
           .name(canaryMetricConfig.getName())
           .startTimeMillis(atlasResults.getStart())
           .startTimeIso(responseStartTimeInstant.toString())
+          .endTimeMillis(atlasResults.getEnd())
+          .endTimeIso(responseEndTimeInstant.toString())
           .stepMillis(atlasResults.getStep())
           .values(timeSeriesList);
 
